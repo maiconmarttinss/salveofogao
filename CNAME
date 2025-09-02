@@ -1,0 +1,4 @@
+echo "giganteglorioso.online" > CNAME
+git add CNAME
+git commit -m "chore: configura domínio customizado (GitHub Pages)"
+git push
