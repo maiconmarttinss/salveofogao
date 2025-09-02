@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>SALVE O FOGÃO!</title>
+<title>Flapzinho — BFR x NF (Responsivo)</title>
 <style>
   :root{ --bg:#0d1117; --panel:#151b23; --line:#232a34; --fg:#e6edf3; --mut:#9aa0a6; --acc:#3ddc97; }
   *{box-sizing:border-box}
@@ -17,19 +17,33 @@
   button:hover{filter:brightness(1.06)}
   .score{color:var(--mut);font-weight:600}
   .badge{background:#202938;border:1px solid #2b3442;border-radius:999px;padding:4px 10px;color:var(--mut);font-size:12px}
+
+  /* Canvas responsivo: 16:9 e até 1280px no desktop */
   canvas{
-    width:1280px;height:720px;
+    width:100%;
+    max-width:1280px;
+    aspect-ratio:16/9;
     background:#0f1622; /* cor neutra enquanto carrega o bg */
-    border:1px solid var(--line);border-radius:16px;display:block
+    border:1px solid var(--line);
+    border-radius:16px;
+    display:block;
   }
+
   .help{color:var(--mut);font-size:13px;line-height:1.5}
   .touch{display:flex;gap:8px;margin-top:6px}
   .touch .btn{flex:1}
+
+  /* Mobile: usar a largura toda e reduzir paddings */
+  @media (max-width: 768px){
+    .wrap{max-width:none;padding:12px}
+    canvas{max-width:100vw}
+    h1{font-size:18px}
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>SALVE O FOGÃO DAS VENDAS PARA O FOREST!</h1>
+  <h1>Flapzinho — BFR desviando do Forest 😎</h1>
   <div class="hud">
     <div class="left">
       <span class="badge">Espaço / ↑ / Enter / clique / toque</span>
@@ -49,7 +63,8 @@
     </div>
   </div>
 
-  <canvas id="game" width="1280" height="720"></canvas>
+  <!-- Canvas sem width/height fixos: o JS define tudo -->
+  <canvas id="game"></canvas>
 
   <div class="help">
     Pulo em toque/clique/tecla. Passe no meio dos “canos vermelhos” (Marinakis + Forest).
@@ -82,22 +97,65 @@ const UI = {
   score: document.getElementById('score'),
   best: document.getElementById('best'),
 };
+const UI_WRAP = document.querySelector('.wrap');
 
 let state = 'menu'; // 'menu' | 'playing' | 'paused' | 'gameover'
 let running=false, paused=false, last=0, assetsReady=false;
 
-const world = { w: canvas.width, h: canvas.height, groundH: 84, gravity: 1800, scroll: 0 };
+/* ===== Mundo base (será ajustado pelo fitCanvas) ===== */
+const world = { w: 1280, h: 720, groundH: 84, gravity: 1800, scroll: 0 };
+let SCALE = 1; // relativo a 720 de altura (base 1280x720)
 
+/* ===== Responsivo (PC/Mobile com retina) ===== */
+function fitCanvas(){
+  const dpr = window.devicePixelRatio || 1;
+
+  // largura CSS alvo (até 1280px)
+  const cssW = Math.min(UI_WRAP.clientWidth, 1280);
+  const cssH = Math.round(cssW * 9/16);
+
+  canvas.style.width  = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+
+  // bitmap real para nitidez
+  canvas.width  = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+
+  // desenhar em coordenadas CSS
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // atualiza mundo em unidades CSS
+  world.w = cssW;
+  world.h = cssH;
+
+  // fator de escala em relação à base (altura 720)
+  SCALE = world.h / 720;
+
+  // recalibra parâmetros dependentes do tamanho
+  world.groundH = Math.round(84 * SCALE);
+  world.gravity = 1800 * SCALE;
+
+  if (!running || paused || state !== 'playing') draw(false);
+}
+window.addEventListener('resize', fitCanvas);
+
+/* ===== Bird e jogo ===== */
 const birdBase = { x: 240, y: 0, w: 56, h: 56, vy: 0, flap: 520, maxFall: 900 };
 let bird=null, pipes=[], particles=[], score=0;
 let best = Number(localStorage.getItem('flap_best')||0);
 UI.best.textContent = `Recorde: ${best}`;
 
-const diffTable = {
-  easy:   { gap: 190, spacing: 360, speed: 280 },
-  normal: { gap: 170, spacing: 330, speed: 320 },
-  hard:   { gap: 150, spacing: 300, speed: 360 },
-};
+/* Dificuldades escaladas */
+function getDiffTable(){
+  const s = SCALE;
+  return {
+    easy:   { gap: 190*s, spacing: 360*s, speed: 280*s },
+    normal: { gap: 170*s, spacing: 330*s, speed: 320*s },
+    hard:   { gap: 150*s, spacing: 300*s, speed: 360*s },
+  };
+}
+function Dcur(){ return getDiffTable()[diff]; }
+
 let diff='normal', spawnTimer=0, spawnEvery=1000;
 
 /* ===== Assets ===== */
@@ -107,8 +165,8 @@ Promise.all([
   loadImage('botafogo.png'),
   loadImage('marinakis.png'),
   loadImage('nf.png'),
-  loadImage('bgtextorfase.png'), // fundo do gameplay
-  loadImage('bg.png'),           // tela de abertura
+  loadImage('bgtextorfase.png'), // gameplay
+  loadImage('bg.png'),           // menu
 ]).then(([b,m,f,bg,menuBg])=>{
   ASSETS.bird=b; ASSETS.marinakis=m; ASSETS.forest=f; ASSETS.bg=bg; ASSETS.menu=menuBg;
   assetsReady = true; draw(false);
@@ -139,16 +197,15 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const rand=(a,b)=>Math.random()*(b-a)+a;
 function aabb(a,b){ return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y; }
 
-/* ===== Menu: botão central (coordenadas no canvas) ===== */
+/* ===== Menu: botão central (em coordenadas CSS do canvas) ===== */
 const menuBtn = { w: 360, h: 100 };
-function menuBtnRect(){
-  return { x: (world.w - menuBtn.w)/2, y: (world.h - menuBtn.h)/2, w: menuBtn.w, h: menuBtn.h };
-}
+function menuBtnRect(){ return { x: (world.w - menuBtn.w)/2, y: (world.h - menuBtn.h)/2, w: menuBtn.w, h: menuBtn.h }; }
 function pointInRect(px,py,r){ return px>=r.x && px<=r.x+r.w && py>=r.y && py<=r.y+r.h; }
 function canvasPos(evt){
   const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
+  // Mapear para coordenadas CSS do mundo
+  const scaleX = world.w / rect.width;
+  const scaleY = world.h / rect.height;
   const x = (evt.clientX - rect.left) * scaleX;
   const y = (evt.clientY - rect.top) * scaleY;
   return {x,y};
@@ -158,8 +215,17 @@ function canvasPos(evt){
 function reset(){
   diff = UI.diff.value;
   world.scroll = 0;
-  bird = {...birdBase};
-  bird.y = world.h/2 - 40; bird.vy = 0;
+
+  const bw = Math.round(56 * SCALE);
+  const bh = Math.round(56 * SCALE);
+
+  bird = {
+    x: Math.round(world.w * 0.1875), // ~240/1280 da largura
+    y: 0, w: bw, h: bh,
+    vy: 0, flap: 520 * SCALE, maxFall: 900 * SCALE
+  };
+  bird.y = world.h/2 - Math.round(40 * SCALE);
+
   pipes = []; particles = [];
   score = 0; spawnTimer = 0; spawnEvery = 1000;
   updateHUD();
@@ -173,11 +239,7 @@ function start(){
   try{ if(!audioMuted){ BGM.currentTime=0; BGM.play(); } }catch(e){}
   requestAnimationFrame(loop);
 }
-function goMenu(){
-  state='menu';
-  running=false; paused=false;
-  draw(false);
-}
+function goMenu(){ state='menu'; running=false; paused=false; draw(false); }
 function pauseToggle(){
   if(state!=='playing') return;
   paused=!paused;
@@ -193,11 +255,10 @@ function gameOver(){
   try{BGM.pause();}catch(e){}
   playSfx(SFX.hit);
   draw(true);
-  // Mensagem customizada
   setTimeout(()=>{ alert(`Você salvou ${score} jogador${score===1?'':'es'} do elenco`); }, 30);
 }
 
-/* ===== Inputs ===== */
+/* ===== Entradas ===== */
 function flapOrStart(){
   ensureAudioUnlocked();
   if(state==='menu'){ start(); return; }
@@ -215,7 +276,7 @@ canvas.addEventListener('mousedown', (e)=>{
   if(state==='menu'){
     const p = canvasPos(e);
     if(pointInRect(p.x, p.y, menuBtnRect())) start();
-    else flapOrStart(); // clique fora também pode iniciar
+    else flapOrStart();
   } else {
     flapOrStart();
   }
@@ -244,13 +305,14 @@ function loop(ts){
 
 /* ===== Update ===== */
 function update(dt){
-  const D = diffTable[diff];
+  const D = Dcur();
   world.scroll += D.speed * dt;
 
-  bird.vy = clamp(bird.vy + world.gravity*dt, -999, bird.maxFall);
+  bird.vy = clamp(bird.vy + world.gravity*dt, -9999, bird.maxFall);
   bird.y  += bird.vy * dt;
 
-  const topLimit=8, groundY = world.h - world.groundH;
+  const topLimit = Math.round(8 * SCALE);
+  const groundY = world.h - world.groundH;
   if(bird.y<topLimit){ bird.y=topLimit; bird.vy=0; }
   if(bird.y + bird.h > groundY){ bird.y = groundY - bird.h; gameOver(); return; }
 
@@ -273,7 +335,7 @@ function update(dt){
       updateHUD();
     }
     if(aabb(bird,p)){ gameOver(); return; }
-    if(p.x + p.w < -120) pipes.splice(i,1);
+    if(p.x + p.w < -120*SCALE) pipes.splice(i,1);
   }
 
   // partículas
@@ -288,35 +350,37 @@ function update(dt){
   }
 }
 function spawnPipe(D){
-  const margin=40;
+  const margin = Math.round(40 * SCALE);
   const groundY=world.h - world.groundH;
-  const minY = margin + 40;
-  const maxY = groundY - margin - D.gap - 40;
+  const minY = margin + Math.round(40 * SCALE);
+  const maxY = groundY - margin - D.gap - Math.round(40 * SCALE);
   const yTopBottom = rand(minY, maxY);
-  const pipeW=76;
-  pipes.push({ x: world.w + 20, y: 0, w: pipeW, h: yTopBottom, isTop:true });
-  pipes.push({ x: world.w + 20, y: yTopBottom + D.gap, w: pipeW, h: groundY - (yTopBottom + D.gap), isTop:false, counted:false });
-}
-function updateHUD(){ UI.score.textContent=`Jogadores salvos: ${score}`; UI.best.textContent=`Recorde: ${best}`; }
+  const pipeW = Math.round(76 * SCALE);
 
-/* ===== Partículas do flap ===== */
+  pipes.push({ x: world.w + 20*SCALE, y: 0, w: pipeW, h: yTopBottom, isTop:true });
+  pipes.push({ x: world.w + 20*SCALE, y: yTopBottom + D.gap, w: pipeW, h: groundY - (yTopBottom + D.gap), isTop:false, counted:false });
+}
+function updateHUD(){ UI.score.textContent=`Pontuação: ${score}`; UI.best.textContent=`Recorde: ${best}`; }
+
+/* ===== Partículas do flap (escaladas) ===== */
 function spawnFlapFX(){
-  const baseX = bird.x - 4, baseY = bird.y + bird.h/2;
+  const baseX = bird.x - 4*SCALE, baseY = bird.y + bird.h/2;
+
   for(let i=0;i<10;i++){
-    particles.push({ kind:'fire', x:baseX+rand(-3,3), y:baseY+rand(-4,4),
-      vx:rand(-120,-40), vy:rand(-40,60), g:60, size:rand(6,12),
+    particles.push({ kind:'fire', x:baseX+rand(-3,3)*SCALE, y:baseY+rand(-4,4)*SCALE,
+      vx:rand(-120,-40)*SCALE, vy:rand(-40,60)*SCALE, g:60*SCALE, size:rand(6,12)*SCALE,
       alpha:1, fade:rand(1.8,2.6), life:rand(0.25,0.45), hue:rand(20,45)
     });
   }
   for(let i=0;i<14;i++){
-    particles.push({ kind:'spark', x:baseX, y:baseY, vx:rand(-260,-120), vy:rand(-80,80),
-      g:220, len:rand(6,16), alpha:1, fade:rand(2.4,3.4), life:rand(0.18,0.35),
-      hue:rand(25,40), width:rand(1,2)
+    particles.push({ kind:'spark', x:baseX, y:baseY, vx:rand(-260,-120)*SCALE, vy:rand(-80,80)*SCALE,
+      g:220*SCALE, len:rand(6,16)*SCALE, alpha:1, fade:rand(2.4,3.4), life:rand(0.18,0.35),
+      hue:rand(25,40), width:rand(1,2)*SCALE
     });
   }
   for(let i=0;i<4;i++){
-    particles.push({ kind:'smoke', x:baseX+rand(-4,2), y:baseY+rand(-3,3), vx:rand(-50,-20),
-      vy:rand(-10,20), g:-5, size:rand(8,14), alpha:0.35, fade:rand(0.6,0.9), life:rand(0.5,0.8)
+    particles.push({ kind:'smoke', x:baseX+rand(-4,2)*SCALE, y:baseY+rand(-3,3)*SCALE, vx:rand(-50,-20)*SCALE,
+      vy:rand(-10,20)*SCALE, g:-5*SCALE, size:rand(8,14)*SCALE, alpha:0.35, fade:rand(0.6,0.9), life:rand(0.5,0.8)
     });
   }
 }
@@ -345,7 +409,8 @@ function draw(showOverlay){
       grad.addColorStop(1,`rgba(0,0,0,0)`);
       ctx.fillStyle=grad; ctx.beginPath(); ctx.arc(p.x,p.y,r,0,Math.PI*2); ctx.fill();
     }else if(p.kind==='spark'){
-      ctx.lineWidth=p.width; ctx.strokeStyle=`hsla(${p.hue},100%,60%,${0.9*a})`;
+      ctx.lineWidth=Math.max(1, p.width);
+      ctx.strokeStyle=`hsla(${p.hue},100%,60%,${0.9*a})`;
       ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(p.x+(p.vx*0.03), p.y+(p.vy*0.03)); ctx.stroke();
     }else if(p.kind==='smoke'){
       const r=p.size*(1+(0.6-p.life)); ctx.fillStyle=`rgba(120,140,160,${0.25*a})`;
@@ -354,26 +419,30 @@ function draw(showOverlay){
   }
   ctx.restore();
 
-  // overlays de pausa/game over
+  // overlays
   if(state!=='playing' || showOverlay || !assetsReady){
     ctx.fillStyle='rgba(0,0,0,0.42)';
     ctx.fillRect(0,0,world.w,world.h);
     ctx.fillStyle='#e6edf3'; ctx.textAlign='center';
-    ctx.font='700 26px system-ui,-apple-system,Segoe UI,Roboto,Arial';
+    ctx.font=`700 ${Math.round(26*SCALE)}px system-ui,-apple-system,Segoe UI,Roboto,Arial`;
     const cx=world.w/2, cy=world.h/2;
 
     if(!assetsReady){
-      ctx.fillText('Carregando imagens…', cx, cy-10);
-      ctx.font='400 16px system-ui,-apple-system,Segoe UI,Roboto,Arial'; ctx.fillStyle='#9aa0a6';
-      ctx.fillText('Verifique os arquivos PNG e MP3 na pasta.', cx, cy+14);
+      ctx.fillText('Carregando imagens…', cx, cy-10*SCALE);
+      ctx.font=`400 ${Math.round(16*SCALE)}px system-ui`; ctx.fillStyle='#9aa0a6';
+      ctx.fillText('Verifique os arquivos PNG e MP3 na pasta.', cx, cy+14*SCALE);
     }else if(state==='paused'){
-      ctx.fillText('PAUSADO', cx, cy-10);
-      ctx.font='400 16px system-ui,-apple-system,Segoe UI,Roboto,Arial'; ctx.fillStyle='#9aa0a6';
-      ctx.fillText('Pressione ⏸️ novamente para continuar', cx, cy+16);
+      ctx.fillText('PAUSADO', cx, cy-10*SCALE);
+      ctx.font=`400 ${Math.round(16*SCALE)}px system-ui`; ctx.fillStyle='#9aa0a6';
+      ctx.fillText('Pressione ⏸️ novamente para continuar', cx, cy+16*SCALE);
     }else if(state==='gameover'){
-      ctx.fillText('Fim de jogo!', cx, cy-18);
-      ctx.font='400 16px system-ui,-apple-system,Segoe UI,Roboto,Arial'; ctx.fillStyle='#9aa0a6';
-      ctx.fillText('Clique/Toque/Espaço para reiniciar', cx, cy+10);
+      ctx.fillText('Fim de jogo!', cx, cy-18*SCALE);
+      ctx.font=`400 ${Math.round(16*SCALE)}px system-ui`; ctx.fillStyle='#9aa0a6';
+      ctx.fillText('Clique/Toque/Espaço para reiniciar', cx, cy+10*SCALE);
+    }else{
+      ctx.fillText('Pressione ▶️ Jogar para começar', cx, cy-8*SCALE);
+      ctx.font=`400 ${Math.round(16*SCALE)}px system-ui`; ctx.fillStyle='#9aa0a6';
+      ctx.fillText('Dica: mantenha o ritmo das batidas de asa', cx, cy+18*SCALE);
     }
   }
 }
@@ -399,9 +468,9 @@ function drawBackground(){
   }
 }
 
-/* ===== Tela de abertura ===== */
+/* ===== Tela de abertura (menu) ===== */
 function drawMenu(){
-  // fundo da tela de menu (bg.png) em cover
+  // fundo cover
   if(ASSETS.menu){
     const img=ASSETS.menu;
     const dstW=world.w, dstH=world.h;
@@ -415,74 +484,83 @@ function drawMenu(){
     ctx.fillStyle='#0f1622'; ctx.fillRect(0,0,world.w,world.h);
   }
 
-  // véu leve para destacar o botão
+  // véu leve
   ctx.fillStyle='rgba(0,0,0,0.25)';
   ctx.fillRect(0,0,world.w,world.h);
 
-  // título e instrução
+  // título
   ctx.fillStyle='#e6edf3';
   ctx.textAlign='center';
-  ctx.font='700 38px system-ui,-apple-system,Segoe UI,Roboto,Arial';
-  ctx.fillText('SALVE O FOGÃO DAS VENDAS!', world.w/2, world.h*0.22);
+  ctx.font=`700 ${Math.round(38*SCALE)}px system-ui`;
+  ctx.fillText('Flapzinho — BFR x Nottingham', world.w/2, world.h*0.22);
 
   // botão "aperte start"
-  const r = menuBtnRect();
+  const bw = Math.round(360 * SCALE), bh = Math.round(100 * SCALE);
+  const r = { x:(world.w - bw)/2, y:(world.h - bh)/2, w:bw, h:bh };
+
   // sombra
   ctx.fillStyle='rgba(0,0,0,0.35)';
-  roundRect(r.x+3, r.y+5, r.w, r.h, 16, true);
+  roundRect(r.x+3*SCALE, r.y+5*SCALE, r.w, r.h, 16*SCALE, true);
+
   // botão
   const grad = ctx.createLinearGradient(r.x, r.y, r.x, r.y+r.h);
-  grad.addColorStop(0, '#1f2632');
-  grad.addColorStop(1, '#121821');
+  grad.addColorStop(0, '#1f2632'); grad.addColorStop(1, '#121821');
   ctx.fillStyle = grad;
-  roundRect(r.x, r.y, r.w, r.h, 16, true);
+  roundRect(r.x, r.y, r.w, r.h, 16*SCALE, true);
   ctx.strokeStyle = '#3a4659';
-  ctx.lineWidth = 2;
-  roundedRectStroke(r.x, r.y, r.w, r.h, 16);
+  ctx.lineWidth = Math.max(1, 2*SCALE);
+  roundedRectStroke(r.x, r.y, r.w, r.h, 16*SCALE);
 
-  ctx.font='800 28px system-ui,-apple-system,Segoe UI,Roboto,Arial';
+  ctx.font=`800 ${Math.round(28*SCALE)}px system-ui`;
   ctx.fillStyle='#e6edf3';
-  ctx.fillText('APERTE START', world.w/2, r.y + r.h/2 + 10);
+  ctx.fillText('aperte start', world.w/2, r.y + r.h/2 + 10*SCALE);
 
   // dica
-  ctx.font='400 16px system-ui,-apple-system,Segoe UI,Roboto,Arial';
+  ctx.font=`400 ${Math.round(16*SCALE)}px system-ui`;
   ctx.fillStyle='#9aa0a6';
-  ctx.fillText('Pressione Espaço/Enter, clique ou toque para começar', world.w/2, r.y + r.h + 36);
+  ctx.fillText('Pressione Espaço/Enter, clique ou toque para começar', world.w/2, r.y + r.h + 36*SCALE);
 }
 
 /* ===== Ground / Bird / Pipes ===== */
 function drawGround(){
   const groundY = world.h - world.groundH;
   ctx.fillStyle='#0b121b'; ctx.fillRect(0,groundY,world.w,world.groundH);
-  const t=world.scroll, tile=40, offset=-((t)%tile);
+  const t=world.scroll, tile=Math.round(40*SCALE), offset=-((t)%tile);
   ctx.fillStyle='#1f8f66';
-  for(let x=offset - tile; x<world.w+tile; x+=tile) ctx.fillRect(x, groundY, tile-6, 12);
-  ctx.strokeStyle='#1a2636'; ctx.beginPath(); ctx.moveTo(0,groundY+0.5); ctx.lineTo(world.w,groundY+0.5); ctx.stroke();
+  for(let x=offset - tile; x<world.w+tile; x+=tile){
+    ctx.fillRect(x, groundY, Math.max(2, tile - Math.round(6*SCALE)), Math.max(6, Math.round(12*SCALE)));
+  }
+  ctx.strokeStyle='#1a2636';
+  ctx.lineWidth = Math.max(1, 1*SCALE);
+  ctx.beginPath(); ctx.moveTo(0,groundY+0.5); ctx.lineTo(world.w,groundY+0.5); ctx.stroke();
 }
 function drawBird(){
   const ang = clamp(bird.vy/600,-0.6,0.8);
   const cx = bird.x + bird.w/2, cy = bird.y + bird.h/2;
   ctx.save(); ctx.translate(cx,cy); ctx.rotate(ang);
   if(assetsReady && ASSETS.bird){ ctx.drawImage(ASSETS.bird, -bird.w/2, -bird.h/2, bird.w, bird.h); }
-  else { ctx.fillStyle='#fff'; roundRect(-bird.w/2,-bird.h/2,bird.w,bird.h,10,true); }
+  else { ctx.fillStyle='#fff'; roundRect(-bird.w/2,-bird.h/2,bird.w,bird.h,10*SCALE,true); }
   ctx.restore();
 }
 function drawPipe(p){
-  const r=10; ctx.save(); ctx.beginPath(); roundedRectPath(p.x,p.y,p.w,p.h,r); ctx.clip();
+  const r=10*SCALE; ctx.save(); ctx.beginPath(); roundedRectPath(p.x,p.y,p.w,p.h,r); ctx.clip();
   const grad=ctx.createLinearGradient(p.x,p.y,p.x+p.w,p.y); grad.addColorStop(0,'#c01220'); grad.addColorStop(1,'#8f0f1a');
   ctx.fillStyle=grad; ctx.fillRect(p.x,p.y,p.w,p.h);
-  ctx.fillStyle='#e01e2a'; const capH=14; if(p.isTop) ctx.fillRect(p.x-6,p.h-capH,p.w+12,capH); else ctx.fillRect(p.x-6,p.y,p.w+12,capH);
+  ctx.fillStyle='#e01e2a'; const capH=Math.round(14*SCALE);
+  if(p.isTop) ctx.fillRect(p.x-6*SCALE,p.h-capH,p.w+12*SCALE,capH);
+  else        ctx.fillRect(p.x-6*SCALE,p.y,     p.w+12*SCALE,capH);
+
   if(assetsReady && ASSETS.marinakis && ASSETS.forest){
-    const step=90, iconW=46, iconH=46, logoW=40, logoH=40;
-    const y0 = p.isTop ? (p.y + 16) : (p.y + capH + 6);
-    const y1 = p.isTop ? (p.h - capH - 6) : (p.y + p.h - 16);
+    const step=Math.round(90*SCALE), iconW=Math.round(46*SCALE), iconH=Math.round(46*SCALE), logoW=Math.round(40*SCALE), logoH=Math.round(40*SCALE);
+    const y0 = p.isTop ? (p.y + 16*SCALE) : (p.y + capH + 6*SCALE);
+    const y1 = p.isTop ? (p.h - capH - 6*SCALE) : (p.y + p.h - 16*SCALE);
     for(let yy=y0; yy<y1-iconH; yy+=step){
       ctx.drawImage(ASSETS.marinakis, p.x+(p.w-iconW)/2, yy, iconW, iconH);
-      ctx.drawImage(ASSETS.forest,   p.x+(p.w-logoW)/2, yy+iconH-6, logoW, logoH);
+      ctx.drawImage(ASSETS.forest,   p.x+(p.w-logoW)/2, yy+iconH-6*SCALE, logoW, logoH);
     }
   }
   ctx.restore();
-  ctx.strokeStyle='#5f0d16'; ctx.lineWidth=2; roundedRectStroke(p.x,p.y,p.w,p.h,r);
+  ctx.strokeStyle='#5f0d16'; ctx.lineWidth=Math.max(1,2*SCALE); roundedRectStroke(p.x,p.y,p.w,p.h,r);
 }
 function roundedRectPath(x,y,w,h,r){
   const rr=Math.min(r,w/2,h/2);
@@ -498,7 +576,8 @@ function roundRect(x,y,w,h,r,fill=true){
 
 /* ===== Inicial ===== */
 setMuted(false);
-goMenu(); // inicia na tela de abertura
+fitCanvas();   // calcula tamanhos e escala primeiro
+goMenu();      // começa na tela de abertura
 </script>
 </body>
 </html>
