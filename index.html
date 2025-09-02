@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>SALVE O FOGÃO!</title>
+<style>
+  :root{ --bg:#0d1117; --panel:#151b23; --line:#232a34; --fg:#e6edf3; --mut:#9aa0a6; --acc:#3ddc97; }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  .wrap{max-width:1400px;margin:0 auto;padding:20px;display:flex;flex-direction:column;gap:12px;align-items:center}
+  h1{margin:0;font-size:clamp(18px,3.5vw,26px)}
+  .hud{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .left,.right{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  label{color:var(--mut);font-size:14px}
+  select,button{background:var(--panel);color:var(--fg);border:1px solid var(--line);padding:8px 10px;border-radius:10px;cursor:pointer;font-weight:600}
+  button:hover{filter:brightness(1.06)}
+  .score{color:var(--mut);font-weight:600}
+  .badge{background:#202938;border:1px solid #2b3442;border-radius:999px;padding:4px 10px;color:var(--mut);font-size:12px}
+  canvas{
+    width:1280px;height:720px;
+    background:#0f1622; /* cor neutra enquanto carrega o bg */
+    border:1px solid var(--line);border-radius:16px;display:block
+  }
+  .help{color:var(--mut);font-size:13px;line-height:1.5}
+  .touch{display:flex;gap:8px;margin-top:6px}
+  .touch .btn{flex:1}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SALVE O FOGÃO DAS VENDAS PARA O FOREST!</h1>
+  <div class="hud">
+    <div class="left">
+      <span class="badge">Espaço / ↑ / Enter / clique / toque</span>
+      <label for="diff">Dificuldade:</label>
+      <select id="diff">
+        <option value="easy">Fácil</option>
+        <option value="normal" selected>Médio</option>
+        <option value="hard">Difícil</option>
+      </select>
+      <button id="start" class="btn">▶️ Jogar / Reiniciar</button>
+      <button id="pause" class="btn">⏸️ Pausar</button>
+      <button id="mute"  class="btn">🔊 Som: ON</button>
+    </div>
+    <div class="right">
+      <span id="score" class="score">Pontuação: 0</span>
+      <span id="best" class="score">Recorde: 0</span>
+    </div>
+  </div>
+
+  <canvas id="game" width="1280" height="720"></canvas>
+
+  <div class="help">
+    Pulo em toque/clique/tecla. Passe no meio dos “canos vermelhos” (Marinakis + Forest).
+    <div class="touch">
+      <button id="flapBtn" class="btn">🕊️ Bater asa</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===== Util ===== */
+function loadImage(src){
+  return new Promise((resolve,reject)=>{
+    const img = new Image();
+    img.onload = ()=>resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+/* ===== Setup ===== */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const UI = {
+  diff: document.getElementById('diff'),
+  start: document.getElementById('start'),
+  pause: document.getElementById('pause'),
+  mute:  document.getElementById('mute'),
+  flapBtn: document.getElementById('flapBtn'),
+  score: document.getElementById('score'),
+  best: document.getElementById('best'),
+};
+
+let state = 'menu'; // 'menu' | 'playing' | 'paused' | 'gameover'
+let running=false, paused=false, last=0, assetsReady=false;
+
+const world = { w: canvas.width, h: canvas.height, groundH: 84, gravity: 1800, scroll: 0 };
+
+const birdBase = { x: 240, y: 0, w: 56, h: 56, vy: 0, flap: 520, maxFall: 900 };
+let bird=null, pipes=[], particles=[], score=0;
+let best = Number(localStorage.getItem('flap_best')||0);
+UI.best.textContent = `Recorde: ${best}`;
+
+const diffTable = {
+  easy:   { gap: 190, spacing: 360, speed: 280 },
+  normal: { gap: 170, spacing: 330, speed: 320 },
+  hard:   { gap: 150, spacing: 300, speed: 360 },
+};
+let diff='normal', spawnTimer=0, spawnEvery=1000;
+
+/* ===== Assets ===== */
+const ASSETS = { bird:null, marinakis:null, forest:null, bg:null, menu:null };
+
+Promise.all([
+  loadImage('botafogo.png'),
+  loadImage('marinakis.png'),
+  loadImage('nf.png'),
+  loadImage('bgtextorfase.png'), // fundo do gameplay
+  loadImage('bg.png'),           // tela de abertura
+]).then(([b,m,f,bg,menuBg])=>{
+  ASSETS.bird=b; ASSETS.marinakis=m; ASSETS.forest=f; ASSETS.bg=bg; ASSETS.menu=menuBg;
+  assetsReady = true; draw(false);
+}).catch(()=>{ assetsReady=false; });
+
+/* ===== Áudio ===== */
+let audioReady=false, audioMuted=false;
+const SFX = {
+  flap:  new Audio('sfx/flap.mp3'),
+  point: new Audio('sfx/point.mp3'),
+  hit:   new Audio('sfx/hit.mp3'),
+};
+Object.values(SFX).forEach(a=>{ a.preload='auto'; a.volume=0.75; });
+
+const BGM = new Audio('music/theme.mp3');
+BGM.loop=true; BGM.volume=0.35; BGM.preload='auto';
+
+function setMuted(m){ audioMuted=m; BGM.muted=m; Object.values(SFX).forEach(a=>a.muted=m); UI.mute.textContent=m?'🔇 Som: OFF':'🔊 Som: ON'; }
+function ensureAudioUnlocked(){
+  if(audioReady) return;
+  try{ BGM.play().then(()=>{BGM.pause();BGM.currentTime=0;audioReady=true;}).catch(()=>{}); }catch(e){}
+  audioReady=true;
+}
+function playSfx(a){ if(audioMuted) return; try{ a.currentTime=0; a.play(); }catch(e){} }
+
+/* ===== Helpers ===== */
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const rand=(a,b)=>Math.random()*(b-a)+a;
+function aabb(a,b){ return a.x<b.x+b.w && a.x+a.w>b.x && a.y<b.y+b.h && a.y+a.h>b.y; }
+
+/* ===== Menu: botão central (coordenadas no canvas) ===== */
+const menuBtn = { w: 360, h: 100 };
+function menuBtnRect(){
+  return { x: (world.w - menuBtn.w)/2, y: (world.h - menuBtn.h)/2, w: menuBtn.w, h: menuBtn.h };
+}
+function pointInRect(px,py,r){ return px>=r.x && px<=r.x+r.w && py>=r.y && py<=r.y+r.h; }
+function canvasPos(evt){
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (evt.clientX - rect.left) * scaleX;
+  const y = (evt.clientY - rect.top) * scaleY;
+  return {x,y};
+}
+
+/* ===== Game Flow ===== */
+function reset(){
+  diff = UI.diff.value;
+  world.scroll = 0;
+  bird = {...birdBase};
+  bird.y = world.h/2 - 40; bird.vy = 0;
+  pipes = []; particles = [];
+  score = 0; spawnTimer = 0; spawnEvery = 1000;
+  updateHUD();
+}
+function start(){
+  reset();
+  state='playing';
+  running=true; paused=false;
+  last = performance.now();
+  ensureAudioUnlocked();
+  try{ if(!audioMuted){ BGM.currentTime=0; BGM.play(); } }catch(e){}
+  requestAnimationFrame(loop);
+}
+function goMenu(){
+  state='menu';
+  running=false; paused=false;
+  draw(false);
+}
+function pauseToggle(){
+  if(state!=='playing') return;
+  paused=!paused;
+  state = paused ? 'paused' : 'playing';
+  if(paused){ try{BGM.pause();}catch(e){}; draw(true); return; }
+  try{ if(!audioMuted) BGM.play(); }catch(e){}
+  last = performance.now();
+  requestAnimationFrame(loop);
+}
+function gameOver(){
+  running=false;
+  state='gameover';
+  try{BGM.pause();}catch(e){}
+  playSfx(SFX.hit);
+  draw(true);
+  // Mensagem customizada
+  setTimeout(()=>{ alert(`Você salvou ${score} jogador${score===1?'':'es'} do elenco`); }, 30);
+}
+
+/* ===== Inputs ===== */
+function flapOrStart(){
+  ensureAudioUnlocked();
+  if(state==='menu'){ start(); return; }
+  if(state!=='playing') return;
+  bird.vy = -bird.flap;
+  playSfx(SFX.flap);
+  spawnFlapFX();
+}
+window.addEventListener('keydown', (e)=>{
+  if(e.code==='Space'||e.code==='ArrowUp'||e.code==='Enter'){
+    e.preventDefault(); flapOrStart();
+  } else if(e.code==='KeyP'){ pauseToggle(); }
+});
+canvas.addEventListener('mousedown', (e)=>{
+  if(state==='menu'){
+    const p = canvasPos(e);
+    if(pointInRect(p.x, p.y, menuBtnRect())) start();
+    else flapOrStart(); // clique fora também pode iniciar
+  } else {
+    flapOrStart();
+  }
+});
+canvas.addEventListener('touchstart', e=>{
+  e.preventDefault();
+  if(state==='menu'){ start(); return; }
+  flapOrStart();
+}, {passive:false});
+
+UI.flapBtn.addEventListener('click', flapOrStart);
+UI.start.addEventListener('click', start);
+UI.pause.addEventListener('click', pauseToggle);
+UI.mute.addEventListener('click', ()=>setMuted(!audioMuted));
+UI.diff.addEventListener('change', ()=>{ if(state!=='playing') reset(); });
+
+/* ===== Loop ===== */
+function loop(ts){
+  if(!running || paused) return;
+  const dt = Math.min(0.033,(ts-last)/1000);
+  last = ts;
+  update(dt);
+  draw(false);
+  requestAnimationFrame(loop);
+}
+
+/* ===== Update ===== */
+function update(dt){
+  const D = diffTable[diff];
+  world.scroll += D.speed * dt;
+
+  bird.vy = clamp(bird.vy + world.gravity*dt, -999, bird.maxFall);
+  bird.y  += bird.vy * dt;
+
+  const topLimit=8, groundY = world.h - world.groundH;
+  if(bird.y<topLimit){ bird.y=topLimit; bird.vy=0; }
+  if(bird.y + bird.h > groundY){ bird.y = groundY - bird.h; gameOver(); return; }
+
+  spawnTimer += dt*1000;
+  if(spawnTimer >= spawnEvery){
+    spawnTimer=0;
+    spawnEvery = D.spacing * (1000/D.speed);
+    spawnPipe(D);
+  }
+
+  for(let i=pipes.length-1;i>=0;i--){
+    const p=pipes[i];
+    p.x -= D.speed * dt;
+
+    if(!p.counted && !p.isTop && (p.x + p.w) < bird.x){
+      p.counted=true;
+      score++; playSfx(SFX.point);
+      best=Math.max(best,score);
+      localStorage.setItem('flap_best', String(best));
+      updateHUD();
+    }
+    if(aabb(bird,p)){ gameOver(); return; }
+    if(p.x + p.w < -120) pipes.splice(i,1);
+  }
+
+  // partículas
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    p.vy += (p.g||0)*dt;
+    p.x  += p.vx*dt;
+    p.y  += p.vy*dt;
+    p.life  -= dt;
+    p.alpha -= (p.fade||2)*dt*0.5;
+    if(p.life<=0 || p.alpha<=0) particles.splice(i,1);
+  }
+}
+function spawnPipe(D){
+  const margin=40;
+  const groundY=world.h - world.groundH;
+  const minY = margin + 40;
+  const maxY = groundY - margin - D.gap - 40;
+  const yTopBottom = rand(minY, maxY);
+  const pipeW=76;
+  pipes.push({ x: world.w + 20, y: 0, w: pipeW, h: yTopBottom, isTop:true });
+  pipes.push({ x: world.w + 20, y: yTopBottom + D.gap, w: pipeW, h: groundY - (yTopBottom + D.gap), isTop:false, counted:false });
+}
+function updateHUD(){ UI.score.textContent=`Jogadores salvos: ${score}`; UI.best.textContent=`Recorde: ${best}`; }
+
+/* ===== Partículas do flap ===== */
+function spawnFlapFX(){
+  const baseX = bird.x - 4, baseY = bird.y + bird.h/2;
+  for(let i=0;i<10;i++){
+    particles.push({ kind:'fire', x:baseX+rand(-3,3), y:baseY+rand(-4,4),
+      vx:rand(-120,-40), vy:rand(-40,60), g:60, size:rand(6,12),
+      alpha:1, fade:rand(1.8,2.6), life:rand(0.25,0.45), hue:rand(20,45)
+    });
+  }
+  for(let i=0;i<14;i++){
+    particles.push({ kind:'spark', x:baseX, y:baseY, vx:rand(-260,-120), vy:rand(-80,80),
+      g:220, len:rand(6,16), alpha:1, fade:rand(2.4,3.4), life:rand(0.18,0.35),
+      hue:rand(25,40), width:rand(1,2)
+    });
+  }
+  for(let i=0;i<4;i++){
+    particles.push({ kind:'smoke', x:baseX+rand(-4,2), y:baseY+rand(-3,3), vx:rand(-50,-20),
+      vy:rand(-10,20), g:-5, size:rand(8,14), alpha:0.35, fade:rand(0.6,0.9), life:rand(0.5,0.8)
+    });
+  }
+}
+
+/* ===== Draw ===== */
+function draw(showOverlay){
+  ctx.clearRect(0,0,world.w,world.h);
+
+  if(state==='menu'){ drawMenu(); return; }
+
+  drawBackground();
+  for(const p of pipes) drawPipe(p);
+  drawGround();
+  drawBird();
+
+  // partículas com glow
+  ctx.save();
+  ctx.globalCompositeOperation='lighter';
+  for(const p of particles){
+    const a=Math.max(0,Math.min(1,p.alpha));
+    if(p.kind==='fire'){
+      const r=p.size;
+      const grad=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,r);
+      grad.addColorStop(0,`rgba(255,255,200,${0.9*a})`);
+      grad.addColorStop(0.45,`hsla(${p.hue},100%,55%,${0.7*a})`);
+      grad.addColorStop(1,`rgba(0,0,0,0)`);
+      ctx.fillStyle=grad; ctx.beginPath(); ctx.arc(p.x,p.y,r,0,Math.PI*2); ctx.fill();
+    }else if(p.kind==='spark'){
+      ctx.lineWidth=p.width; ctx.strokeStyle=`hsla(${p.hue},100%,60%,${0.9*a})`;
+      ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(p.x+(p.vx*0.03), p.y+(p.vy*0.03)); ctx.stroke();
+    }else if(p.kind==='smoke'){
+      const r=p.size*(1+(0.6-p.life)); ctx.fillStyle=`rgba(120,140,160,${0.25*a})`;
+      ctx.beginPath(); ctx.arc(p.x,p.y,r,0,Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.restore();
+
+  // overlays de pausa/game over
+  if(state!=='playing' || showOverlay || !assetsReady){
+    ctx.fillStyle='rgba(0,0,0,0.42)';
+    ctx.fillRect(0,0,world.w,world.h);
+    ctx.fillStyle='#e6edf3'; ctx.textAlign='center';
+    ctx.font='700 26px system-ui,-apple-system,Segoe UI,Roboto,Arial';
+    const cx=world.w/2, cy=world.h/2;
+
+    if(!assetsReady){
+      ctx.fillText('Carregando imagens…', cx, cy-10);
+      ctx.font='400 16px system-ui,-apple-system,Segoe UI,Roboto,Arial'; ctx.fillStyle='#9aa0a6';
+      ctx.fillText('Verifique os arquivos PNG e MP3 na pasta.', cx, cy+14);
+    }else if(state==='paused'){
+      ctx.fillText('PAUSADO', cx, cy-10);
+      ctx.font='400 16px system-ui,-apple-system,Segoe UI,Roboto,Arial'; ctx.fillStyle='#9aa0a6';
+      ctx.fillText('Pressione ⏸️ novamente para continuar', cx, cy+16);
+    }else if(state==='gameover'){
+      ctx.fillText('Fim de jogo!', cx, cy-18);
+      ctx.font='400 16px system-ui,-apple-system,Segoe UI,Roboto,Arial'; ctx.fillStyle='#9aa0a6';
+      ctx.fillText('Clique/Toque/Espaço para reiniciar', cx, cy+10);
+    }
+  }
+}
+
+/* ===== Background gameplay (cover + parallax) ===== */
+function drawBackground(){
+  if(ASSETS.bg){
+    const img=ASSETS.bg;
+    const dstW=world.w, dstH=world.h;
+    const imgW=img.naturalWidth||img.width, imgH=img.naturalHeight||img.height;
+    const srcRatio=imgW/imgH, dstRatio=dstW/dstH;
+    let drawW, drawH;
+    if(srcRatio>dstRatio){ drawH=dstH; drawW=drawH*srcRatio; } else { drawW=dstW; drawH=drawW/srcRatio; }
+
+    const t = (world.scroll*0.05) % drawW; // parallax suave
+    const x0 = -((drawW-dstW)/2) - t;
+    const y0 = -((drawH-dstH)/2);
+
+    ctx.drawImage(img, x0, y0, drawW, drawH);
+    ctx.drawImage(img, x0 + drawW, y0, drawW, drawH); // emenda
+  } else {
+    ctx.fillStyle='#0f1622'; ctx.fillRect(0,0,world.w,world.h);
+  }
+}
+
+/* ===== Tela de abertura ===== */
+function drawMenu(){
+  // fundo da tela de menu (bg.png) em cover
+  if(ASSETS.menu){
+    const img=ASSETS.menu;
+    const dstW=world.w, dstH=world.h;
+    const imgW=img.naturalWidth||img.width, imgH=img.naturalHeight||img.height;
+    const srcRatio=imgW/imgH, dstRatio=dstW/dstH;
+    let drawW, drawH;
+    if(srcRatio>dstRatio){ drawH=dstH; drawW=drawH*srcRatio; } else { drawW=dstW; drawH=drawW/srcRatio; }
+    const x0 = -((drawW-dstW)/2), y0 = -((drawH-dstH)/2);
+    ctx.drawImage(img, x0, y0, drawW, drawH);
+  } else {
+    ctx.fillStyle='#0f1622'; ctx.fillRect(0,0,world.w,world.h);
+  }
+
+  // véu leve para destacar o botão
+  ctx.fillStyle='rgba(0,0,0,0.25)';
+  ctx.fillRect(0,0,world.w,world.h);
+
+  // título e instrução
+  ctx.fillStyle='#e6edf3';
+  ctx.textAlign='center';
+  ctx.font='700 38px system-ui,-apple-system,Segoe UI,Roboto,Arial';
+  ctx.fillText('SALVE O FOGÃO DAS VENDAS!', world.w/2, world.h*0.22);
+
+  // botão "aperte start"
+  const r = menuBtnRect();
+  // sombra
+  ctx.fillStyle='rgba(0,0,0,0.35)';
+  roundRect(r.x+3, r.y+5, r.w, r.h, 16, true);
+  // botão
+  const grad = ctx.createLinearGradient(r.x, r.y, r.x, r.y+r.h);
+  grad.addColorStop(0, '#1f2632');
+  grad.addColorStop(1, '#121821');
+  ctx.fillStyle = grad;
+  roundRect(r.x, r.y, r.w, r.h, 16, true);
+  ctx.strokeStyle = '#3a4659';
+  ctx.lineWidth = 2;
+  roundedRectStroke(r.x, r.y, r.w, r.h, 16);
+
+  ctx.font='800 28px system-ui,-apple-system,Segoe UI,Roboto,Arial';
+  ctx.fillStyle='#e6edf3';
+  ctx.fillText('APERTE START', world.w/2, r.y + r.h/2 + 10);
+
+  // dica
+  ctx.font='400 16px system-ui,-apple-system,Segoe UI,Roboto,Arial';
+  ctx.fillStyle='#9aa0a6';
+  ctx.fillText('Pressione Espaço/Enter, clique ou toque para começar', world.w/2, r.y + r.h + 36);
+}
+
+/* ===== Ground / Bird / Pipes ===== */
+function drawGround(){
+  const groundY = world.h - world.groundH;
+  ctx.fillStyle='#0b121b'; ctx.fillRect(0,groundY,world.w,world.groundH);
+  const t=world.scroll, tile=40, offset=-((t)%tile);
+  ctx.fillStyle='#1f8f66';
+  for(let x=offset - tile; x<world.w+tile; x+=tile) ctx.fillRect(x, groundY, tile-6, 12);
+  ctx.strokeStyle='#1a2636'; ctx.beginPath(); ctx.moveTo(0,groundY+0.5); ctx.lineTo(world.w,groundY+0.5); ctx.stroke();
+}
+function drawBird(){
+  const ang = clamp(bird.vy/600,-0.6,0.8);
+  const cx = bird.x + bird.w/2, cy = bird.y + bird.h/2;
+  ctx.save(); ctx.translate(cx,cy); ctx.rotate(ang);
+  if(assetsReady && ASSETS.bird){ ctx.drawImage(ASSETS.bird, -bird.w/2, -bird.h/2, bird.w, bird.h); }
+  else { ctx.fillStyle='#fff'; roundRect(-bird.w/2,-bird.h/2,bird.w,bird.h,10,true); }
+  ctx.restore();
+}
+function drawPipe(p){
+  const r=10; ctx.save(); ctx.beginPath(); roundedRectPath(p.x,p.y,p.w,p.h,r); ctx.clip();
+  const grad=ctx.createLinearGradient(p.x,p.y,p.x+p.w,p.y); grad.addColorStop(0,'#c01220'); grad.addColorStop(1,'#8f0f1a');
+  ctx.fillStyle=grad; ctx.fillRect(p.x,p.y,p.w,p.h);
+  ctx.fillStyle='#e01e2a'; const capH=14; if(p.isTop) ctx.fillRect(p.x-6,p.h-capH,p.w+12,capH); else ctx.fillRect(p.x-6,p.y,p.w+12,capH);
+  if(assetsReady && ASSETS.marinakis && ASSETS.forest){
+    const step=90, iconW=46, iconH=46, logoW=40, logoH=40;
+    const y0 = p.isTop ? (p.y + 16) : (p.y + capH + 6);
+    const y1 = p.isTop ? (p.h - capH - 6) : (p.y + p.h - 16);
+    for(let yy=y0; yy<y1-iconH; yy+=step){
+      ctx.drawImage(ASSETS.marinakis, p.x+(p.w-iconW)/2, yy, iconW, iconH);
+      ctx.drawImage(ASSETS.forest,   p.x+(p.w-logoW)/2, yy+iconH-6, logoW, logoH);
+    }
+  }
+  ctx.restore();
+  ctx.strokeStyle='#5f0d16'; ctx.lineWidth=2; roundedRectStroke(p.x,p.y,p.w,p.h,r);
+}
+function roundedRectPath(x,y,w,h,r){
+  const rr=Math.min(r,w/2,h/2);
+  ctx.moveTo(x+rr,y); ctx.arcTo(x+w,y,x+w,y+h,rr); ctx.arcTo(x+w,y+h,x,y+h,rr);
+  ctx.arcTo(x,y+h,x,y,rr); ctx.arcTo(x,y,x+w,y,rr); ctx.closePath();
+}
+function roundedRectStroke(x,y,w,h,r){ ctx.beginPath(); roundedRectPath(x,y,w,h,r); ctx.stroke(); }
+function roundRect(x,y,w,h,r,fill=true){
+  const rr=Math.min(r,w/2,h/2); ctx.beginPath(); ctx.moveTo(x+rr,y);
+  ctx.arcTo(x+w,y,x+w,y+h,rr); ctx.arcTo(x+w,y+h,x,y+h,rr);
+  ctx.arcTo(x,y+h,x,y,rr); ctx.arcTo(x,y,x+w,y,rr); fill?ctx.fill():ctx.stroke();
+}
+
+/* ===== Inicial ===== */
+setMuted(false);
+goMenu(); // inicia na tela de abertura
+</script>
+</body>
+</html>
